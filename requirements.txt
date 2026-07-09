@@ -11,3 +11,4 @@ rank-bm25
 plotly
 pypdf
 datasets
+bcrypt
