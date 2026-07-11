@@ -1,16 +1,20 @@
 import streamlit as st
 import plotly.graph_objects as go
+import plotly.express as px
 from datetime import datetime
+import time
 from rag_pipeline import (
     load_pdf, split_text, create_db,
     build_bm25_index, hybrid_retrieve,
     retrieve_with_scores, get_sources,
     detect_topic, is_safe_query,
     generate_answer, generate_mcqs,
+    generate_adaptive_mcqs,
     evaluate_answer, create_memory,
     generate_study_plan,
     generate_flashcards, analyze_document, transcribe_audio,
-    BM25_AVAILABLE, RAGAS_AVAILABLE
+    generate_concept_map, generate_exam,
+    BM25_AVAILABLE, RAGAS_AVAILABLE, NX_AVAILABLE
 )
 from auth import register_user, login_user
 from database import (
@@ -112,6 +116,7 @@ st.markdown("""
 .correct-ans { color: #059669; font-weight: 700; }
 .wrong-ans   { color: #dc2626; font-weight: 700; }
 .explanation { color: #64748b; font-size: 13px; margin-top: 8px; padding: 8px 12px; background: #fafafa; border-radius: 8px; }
+.hint-box { color: #92400e; font-size: 12px; margin-top: 6px; padding: 6px 10px; background: #fef3c7; border-radius: 6px; }
  
 .topic-badge {
     display: inline-block;
@@ -205,7 +210,6 @@ st.markdown("""
 .feature-title { color: #0a1628; font-size: 15px; font-weight: 700; margin-bottom: 6px; }
 .feature-desc  { color: #64748b; font-size: 13px; line-height: 1.5; }
  
-/* ── DOCUMENT INTELLIGENCE ── */
 .doc-intel-card {
     background: #ffffff;
     border: 1.5px solid #e2e8f0;
@@ -224,13 +228,12 @@ st.markdown("""
 .diff-intermediate { color: #d97706; font-weight: 700; }
 .diff-advanced { color: #dc2626; font-weight: 700; }
  
-/* ── FLASHCARDS ── */
 .flashcard-front {
     background: #0a1628;
     border-radius: 14px 14px 0 0;
-    padding: 20px;
+    padding: 24px;
     text-align: center;
-    min-height: 80px;
+    min-height: 90px;
     display: flex;
     align-items: center;
     justify-content: center;
@@ -241,22 +244,33 @@ st.markdown("""
     border-top: none;
     border-radius: 0 0 14px 14px;
     padding: 16px 20px;
-    min-height: 80px;
+    min-height: 90px;
 }
-.flashcard-front-text { color: #f59e0b; font-size: 15px; font-weight: 600; }
+.flashcard-front-text { color: #f59e0b; font-size: 16px; font-weight: 600; }
 .flashcard-back-text { color: #334155; font-size: 14px; line-height: 1.6; }
 .flashcard-topic { color: #94a3b8; font-size: 11px; margin-top: 8px; text-align: right; }
-.fc-got-it { background: #d1fae5; border: 1.5px solid #6ee7b7; border-radius: 8px; padding: 6px 14px; color: #065f46; font-weight: 700; font-size: 12px; text-align: center; }
-.fc-review { background: #fee2e2; border: 1.5px solid #fca5a5; border-radius: 8px; padding: 6px 14px; color: #991b1b; font-weight: 700; font-size: 12px; text-align: center; }
  
-/* ── VOICE ── */
-.voice-section {
+.exam-timer {
+    background: #0a1628;
+    border-radius: 12px;
+    padding: 16px 24px;
+    text-align: center;
+    margin-bottom: 16px;
+}
+.exam-timer-val { font-size: 36px; font-weight: 800; color: #f59e0b; font-family: monospace; }
+.exam-timer-label { color: #94a3b8; font-size: 12px; margin-top: 4px; }
+.exam-timer-danger { color: #dc2626 !important; }
+ 
+.short-answer-card {
     background: #ffffff;
     border: 1.5px solid #e2e8f0;
+    border-top: 3px solid #0a1628;
     border-radius: 12px;
-    padding: 16px 20px;
+    padding: 20px;
     margin: 12px 0;
+    box-shadow: 0 2px 8px #0f204008;
 }
+.key-point { color: #059669; font-size: 13px; padding: 3px 0; }
  
 div[data-testid="stButton"] button {
     background: #0a1628;
@@ -287,10 +301,12 @@ def init_state():
         "completed_days": set(), "study_plan": None,
         "current_difficulty": "Medium",
         "doc_intel": None,
-        "flashcards": [],
-        "flashcard_status": {},
-        "current_fc_index": 0,
+        "flashcards": [], "flashcard_status": {}, "current_fc_index": 0,
         "voice_query": "",
+        "concept_map": None,
+        "exam_data": None, "exam_answers": {}, "exam_submitted": False,
+        "exam_start_time": None, "exam_duration": 30,
+        "short_answers": {},
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -353,6 +369,81 @@ def show_auth_page():
  
  
 # ════════════════════════════════════════════════
+# CONCEPT MAP RENDERER
+# ════════════════════════════════════════════════
+def render_concept_map(concept_data):
+    """Renders concept map using Plotly network graph"""
+    if not concept_data:
+        return None
+ 
+    nodes = concept_data.get("nodes", [])
+    edges = concept_data.get("edges", [])
+ 
+    if not nodes:
+        return None
+ 
+    # Build position layout using spring algorithm
+    import math
+    n = len(nodes)
+    positions = {}
+    for i, node in enumerate(nodes):
+        angle = (2 * math.pi * i) / n
+        radius = 1.5 if node.get("category") == "main" else (1.0 if node.get("category") == "sub" else 0.5)
+        positions[node["id"]] = (radius * math.cos(angle), radius * math.sin(angle))
+ 
+    # Color by category
+    color_map = {"main": "#0a1628", "sub": "#f59e0b", "detail": "#94a3b8"}
+    size_map  = {"main": 30, "sub": 20, "detail": 14}
+ 
+    # Edge traces
+    edge_traces = []
+    for edge in edges:
+        src = edge.get("source")
+        tgt = edge.get("target")
+        if src in positions and tgt in positions:
+            x0, y0 = positions[src]
+            x1, y1 = positions[tgt]
+            edge_traces.append(go.Scatter(
+                x=[x0, x1, None], y=[y0, y1, None],
+                mode="lines",
+                line=dict(width=1.5, color="#e2e8f0"),
+                hoverinfo="none",
+                showlegend=False
+            ))
+ 
+    # Node trace
+    node_x = [positions[n["id"]][0] for n in nodes if n["id"] in positions]
+    node_y = [positions[n["id"]][1] for n in nodes if n["id"] in positions]
+    node_text   = [n.get("label", "") for n in nodes if n["id"] in positions]
+    node_colors = [color_map.get(n.get("category", "detail"), "#94a3b8") for n in nodes if n["id"] in positions]
+    node_sizes  = [size_map.get(n.get("category", "detail"), 14) for n in nodes if n["id"] in positions]
+ 
+    node_trace = go.Scatter(
+        x=node_x, y=node_y,
+        mode="markers+text",
+        text=node_text,
+        textposition="top center",
+        marker=dict(size=node_sizes, color=node_colors, line=dict(width=2, color="#ffffff")),
+        hovertext=node_text,
+        hoverinfo="text",
+        showlegend=False
+    )
+ 
+    fig = go.Figure(data=edge_traces + [node_trace])
+    fig.update_layout(
+        paper_bgcolor="#faf8f4",
+        plot_bgcolor="#faf8f4",
+        xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
+        yaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
+        margin=dict(l=20, r=20, t=20, b=20),
+        height=450,
+        font=dict(color="#334155", size=11)
+    )
+ 
+    return fig
+ 
+ 
+# ════════════════════════════════════════════════
 # MAIN APP
 # ════════════════════════════════════════════════
 def show_main_app():
@@ -397,17 +488,21 @@ def show_main_app():
             "🧪 Test Mode",
             "📅 Study Plan",
             "📈 Analytics",
-            "🃏 Flashcards"
+            "🃏 Flashcards",
+            "🗺️ Concept Map",
+            "📝 Exam Mode"
         ])
  
         st.markdown("---")
         st.markdown('<div style="color:#f59e0b;font-size:11px;font-weight:700;letter-spacing:1px;margin-bottom:8px">SYSTEM STATUS</div>', unsafe_allow_html=True)
         bm25_color  = "#f59e0b" if BM25_AVAILABLE else "#dc2626"
         ragas_color = "#f59e0b" if RAGAS_AVAILABLE else "#94a3b8"
+        nx_color    = "#f59e0b" if NX_AVAILABLE else "#94a3b8"
         st.markdown(
             f'<div class="system-status">🔍 Hybrid Search &nbsp;<b style="color:{bm25_color}">{"Active" if BM25_AVAILABLE else "Install rank-bm25"}</b></div>'
             f'<div class="system-status">📊 RAGAS Eval &nbsp;<b style="color:{ragas_color}">{"Active" if RAGAS_AVAILABLE else "Local eval"}</b></div>'
-            f'<div class="system-status">🎙️ Voice Input &nbsp;<b style="color:#f59e0b">Active</b></div>',
+            f'<div class="system-status">🎙️ Voice Input &nbsp;<b style="color:#f59e0b">Active</b></div>'
+            f'<div class="system-status">🗺️ Concept Map &nbsp;<b style="color:{nx_color}">{"Active" if NX_AVAILABLE else "Install networkx"}</b></div>',
             unsafe_allow_html=True
         )
  
@@ -465,15 +560,16 @@ def show_main_app():
         if st.session_state.db is None or st.session_state.pdf_name != filename:
             with st.spinner("Building search indexes..."):
                 db, bm25_index, all_docs, split_docs = process_pdf(file_bytes, filename)
-                st.session_state.db         = db
-                st.session_state.bm25_index = bm25_index
-                st.session_state.all_docs   = all_docs
-                st.session_state.split_docs = split_docs
-                st.session_state.pdf_name   = filename
-                st.session_state.memory     = create_memory()
-                st.session_state.chat       = []
-                st.session_state.doc_intel  = None
-                st.session_state.flashcards = []
+                st.session_state.db          = db
+                st.session_state.bm25_index  = bm25_index
+                st.session_state.all_docs    = all_docs
+                st.session_state.split_docs  = split_docs
+                st.session_state.pdf_name    = filename
+                st.session_state.memory      = create_memory()
+                st.session_state.chat        = []
+                st.session_state.doc_intel   = None
+                st.session_state.flashcards  = []
+                st.session_state.concept_map = None
  
         db         = st.session_state.db
         bm25_index = st.session_state.bm25_index
@@ -482,42 +578,30 @@ def show_main_app():
  
         st.success(f"✅ {filename} is ready")
  
-        # ── TIER 1: DOCUMENT INTELLIGENCE ─────────
+        # ── DOCUMENT INTELLIGENCE ──────────────────
         if st.session_state.doc_intel is None:
             with st.spinner("🔍 Analyzing document..."):
-                st.session_state.doc_intel = analyze_document(
-                    st.session_state.split_docs
-                )
+                st.session_state.doc_intel = analyze_document(st.session_state.split_docs)
  
         intel = st.session_state.doc_intel
         if intel:
-            diff_class = {
-                "Beginner": "diff-beginner",
-                "Intermediate": "diff-intermediate",
-                "Advanced": "diff-advanced"
-            }.get(intel.get("difficulty", "Intermediate"), "diff-intermediate")
- 
-            topics_html = "".join(
-                f'<span class="topic-chip">{t}</span>'
-                for t in intel.get("key_topics", [])
-            )
- 
+            diff_class  = {"Beginner": "diff-beginner", "Intermediate": "diff-intermediate", "Advanced": "diff-advanced"}.get(intel.get("difficulty", "Intermediate"), "diff-intermediate")
+            topics_html = "".join(f'<span class="topic-chip">{t}</span>' for t in intel.get("key_topics", []))
             st.markdown(
                 f'<div class="doc-intel-card">'
                 f'<div class="doc-intel-title">📊 Document Intelligence</div>'
                 f'<p style="color:#334155;font-size:14px;margin-bottom:14px">{intel.get("summary", "")}</p>'
                 f'<div style="margin-bottom:12px">{topics_html}</div>'
                 f'<div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px">'
-                f'<div class="doc-stat"><div class="doc-stat-val">{intel.get("total_pages", "?")}</div><div class="doc-stat-label">Pages</div></div>'
-                f'<div class="doc-stat"><div class="doc-stat-val">{intel.get("total_concepts", "?")} </div><div class="doc-stat-label">Concepts</div></div>'
-                f'<div class="doc-stat"><div class="doc-stat-val">{intel.get("estimated_hours", "?")}h</div><div class="doc-stat-label">Study Time</div></div>'
-                f'<div class="doc-stat"><div class="doc-stat-val {diff_class}">{intel.get("difficulty", "?")}</div><div class="doc-stat-label">Difficulty</div></div>'
+                f'<div class="doc-stat"><div class="doc-stat-val">{intel.get("total_pages","?")}</div><div class="doc-stat-label">Pages</div></div>'
+                f'<div class="doc-stat"><div class="doc-stat-val">{intel.get("total_concepts","?")}</div><div class="doc-stat-label">Concepts</div></div>'
+                f'<div class="doc-stat"><div class="doc-stat-val">{intel.get("estimated_hours","?")}h</div><div class="doc-stat-label">Study Time</div></div>'
+                f'<div class="doc-stat"><div class="doc-stat-val {diff_class}">{intel.get("difficulty","?")}</div><div class="doc-stat-label">Difficulty</div></div>'
                 f'</div>'
                 f'<div style="background:#faf8f4;border-radius:8px;padding:10px 14px;border-left:3px solid #f59e0b">'
                 f'<span style="color:#64748b;font-size:12px;font-weight:700">💡 SUGGESTED FIRST QUESTION: </span>'
-                f'<span style="color:#334155;font-size:13px">{intel.get("suggested_question", "")}</span>'
-                f'</div>'
-                f'</div>',
+                f'<span style="color:#334155;font-size:13px">{intel.get("suggested_question","")}</span>'
+                f'</div></div>',
                 unsafe_allow_html=True
             )
  
@@ -529,10 +613,7 @@ def show_main_app():
         if mode == "💬 Study Chat":
             st.markdown("## 💬 Study Chat")
  
-            # ── TIER 1: VOICE INPUT ───────────────
             with st.expander("🎙️ Voice Input — speak your question"):
-                st.markdown('<div class="voice-section">', unsafe_allow_html=True)
-                st.caption("Click the microphone, speak your question, then click Get Answer.")
                 audio_data = st.audio_input("Record your question", key="voice_input")
                 if audio_data is not None:
                     with st.spinner("Transcribing..."):
@@ -543,9 +624,7 @@ def show_main_app():
                             st.success(f"Transcribed: *{transcribed}*")
                         else:
                             st.error(transcribed)
-                st.markdown('</div>', unsafe_allow_html=True)
  
-            # Use voice query if available
             default_query = st.session_state.get("voice_query", "")
             query = st.text_input(
                 "Ask a question",
@@ -556,18 +635,14 @@ def show_main_app():
             )
  
             if st.button("Get Answer →", use_container_width=True):
-                # Clear voice query after use
                 st.session_state.voice_query = ""
- 
                 if not query.strip():
                     st.warning("Please type or speak a question first.")
                 elif not is_safe_query(query):
                     st.error("Query blocked — contains unsafe content.")
                 else:
                     with st.spinner("Searching and generating answer..."):
-                        docs, confidence, search_type = hybrid_retrieve(
-                            db, bm25_index, all_docs, query, k=adaptive_k
-                        )
+                        docs, confidence, search_type = hybrid_retrieve(db, bm25_index, all_docs, query, k=adaptive_k)
                         sources     = get_sources(docs)
                         answer      = generate_answer(query, docs, st.session_state.memory)
                         eval_scores = evaluate_answer(query, answer, docs)
@@ -580,13 +655,10 @@ def show_main_app():
                         save_question(user_id, query, topic, float(confidence))
                         update_streak(user_id)
  
-                        # Auto-generate flashcards
                         with st.spinner("Generating flashcards..."):
                             new_cards = generate_flashcards(query, answer, docs)
                             if new_cards:
-                                existing = st.session_state.flashcards
-                                existing.extend(new_cards)
-                                st.session_state.flashcards = existing[-20:]
+                                st.session_state.flashcards = (st.session_state.flashcards + new_cards)[-20:]
  
                         st.session_state.chat.append({"role": "user", "content": query})
                         st.session_state.chat.append({
@@ -599,35 +671,18 @@ def show_main_app():
             if st.session_state.chat:
                 last_ai = next((m for m in reversed(st.session_state.chat) if m["role"] == "ai"), None)
                 if last_ai:
-                    search_badge = (
-                        '<span class="badge badge-hybrid">⚡ HYBRID</span>'
-                        if last_ai.get("search_type") == "hybrid"
-                        else '<span class="badge badge-semantic">SEMANTIC</span>'
-                    )
-                    eval_badge = (
-                        '<span class="badge badge-ragas">RAGAS</span>'
-                        if last_ai.get("eval", {}).get("method") == "ragas"
-                        else '<span class="badge badge-local">LOCAL EVAL</span>'
-                    )
+                    search_badge = '<span class="badge badge-hybrid">⚡ HYBRID</span>' if last_ai.get("search_type") == "hybrid" else '<span class="badge badge-semantic">SEMANTIC</span>'
+                    eval_badge   = '<span class="badge badge-ragas">RAGAS</span>' if last_ai.get("eval", {}).get("method") == "ragas" else '<span class="badge badge-local">LOCAL EVAL</span>'
  
                     c1, c2, c3 = st.columns(3)
                     with c1:
-                        st.markdown(
-                            f'<div class="metric-val">{round(float(last_ai["confidence"]), 1)}%</div>'
-                            f'<div class="metric-label">Confidence {search_badge}</div></div>',
-                            unsafe_allow_html=True)
+                        st.markdown(f'<div class="metric-card"><div class="metric-val">{round(float(last_ai["confidence"]), 1)}%</div><div class="metric-label">Confidence {search_badge}</div></div>', unsafe_allow_html=True)
                     with c2:
                         pages    = last_ai["sources"]
                         page_str = ", ".join(str(p) for p in pages) if pages else "N/A"
-                        st.markdown(
-                            f'<div class="metric-card"><div class="metric-val" style="font-size:18px">p. {page_str}</div>'
-                            f'<div class="metric-label">Source Pages</div></div>',
-                            unsafe_allow_html=True)
+                        st.markdown(f'<div class="metric-card"><div class="metric-val" style="font-size:18px">p. {page_str}</div><div class="metric-label">Source Pages</div></div>', unsafe_allow_html=True)
                     with c3:
-                        st.markdown(
-                            f'<div class="metric-card"><div class="metric-val" style="font-size:16px">{last_ai["topic"]}</div>'
-                            f'<div class="metric-label">Topic Detected</div></div>',
-                            unsafe_allow_html=True)
+                        st.markdown(f'<div class="metric-card"><div class="metric-val" style="font-size:16px">{last_ai["topic"]}</div><div class="metric-label">Topic Detected</div></div>', unsafe_allow_html=True)
  
                     ev = last_ai.get("eval", {})
                     if ev:
@@ -660,48 +715,71 @@ def show_main_app():
                     st.markdown(f'<div class="chat-ai"><div class="ai-label">PREPAI</div>{msg["content"]}</div>', unsafe_allow_html=True)
  
         # ════════════════════════════════════════
-        # MODE 2 — TEST MODE
+        # MODE 2 — TEST MODE (ADAPTIVE)
         # ════════════════════════════════════════
         elif mode == "🧪 Test Mode":
             st.markdown("## 🧪 Test Mode")
-            col1, col2 = st.columns([2, 1])
+            st.caption("Quiz difficulty adapts automatically based on your past performance.")
+ 
+            col1, col2, col3 = st.columns([2, 1, 1])
             with col1:
                 topic_focus = st.text_input("Focus topic (optional)", placeholder="e.g. neural networks, clustering")
             with col2:
                 num_q = st.selectbox("Questions", [3, 5, 7, 10], index=1)
+            with col3:
+                manual_diff = st.selectbox("Override difficulty", ["Auto", "Easy", "Medium", "Hard"])
  
+            # Show adaptive difficulty prediction
             if topic_focus.strip():
-                diff = get_adaptive_difficulty(user_id, topic_focus.strip())
+                auto_diff   = get_adaptive_difficulty(user_id, topic_focus.strip())
+                final_diff  = auto_diff if manual_diff == "Auto" else manual_diff
                 diff_colors = {"Easy": "badge-easy", "Medium": "badge-medium", "Hard": "badge-hard"}
                 st.markdown(
-                    f'<div style="margin-bottom:8px">Adaptive difficulty for <b>{topic_focus}</b>: '
-                    f'<span class="badge {diff_colors[diff]}">{diff}</span> '
-                    f'<span style="color:#64748b;font-size:12px">(based on your past performance)</span></div>',
+                    f'<div style="margin-bottom:8px">'
+                    f'Difficulty for <b>{topic_focus}</b>: '
+                    f'<span class="badge {diff_colors[final_diff]}">{final_diff}</span>'
+                    f'{"<span style=\"color:#64748b;font-size:12px\"> (auto-detected from your history)</span>" if manual_diff == "Auto" else "<span style=\"color:#64748b;font-size:12px\"> (manually set)</span>"}'
+                    f'</div>',
                     unsafe_allow_html=True
                 )
  
             if st.button("Generate Quiz →", use_container_width=True):
                 search_query = topic_focus.strip() if topic_focus.strip() else "important concepts"
-                difficulty   = get_adaptive_difficulty(user_id, search_query)
-                with st.spinner(f"Generating {difficulty} quiz..."):
+                auto_diff    = get_adaptive_difficulty(user_id, search_query)
+                final_diff   = auto_diff if manual_diff == "Auto" else manual_diff
+ 
+                with st.spinner(f"Generating {final_diff} difficulty quiz..."):
                     docs, _, _ = retrieve_with_scores(db, search_query, k=5)
-                    questions  = generate_mcqs(docs, num_questions=num_q)
+                    questions  = generate_adaptive_mcqs(docs, num_questions=num_q, difficulty=final_diff)
                     if questions:
-                        st.session_state.quiz_data         = questions
-                        st.session_state.quiz_submitted     = False
-                        st.session_state.user_answers       = {}
-                        st.session_state.score              = 0
-                        st.session_state.current_difficulty = difficulty
+                        st.session_state.quiz_data          = questions
+                        st.session_state.quiz_submitted      = False
+                        st.session_state.user_answers        = {}
+                        st.session_state.score               = 0
+                        st.session_state.current_difficulty  = final_diff
                     else:
                         st.error("Failed to generate quiz. Try a larger PDF.")
  
             if st.session_state.quiz_data:
                 questions = st.session_state.quiz_data
-                st.markdown(f"### Quiz — {len(questions)} Questions")
+                curr_diff = st.session_state.get("current_difficulty", "Medium")
+                diff_colors = {"Easy": "badge-easy", "Medium": "badge-medium", "Hard": "badge-hard"}
+                st.markdown(
+                    f'### Quiz — {len(questions)} Questions '
+                    f'<span class="badge {diff_colors.get(curr_diff, "badge-medium")}">{curr_diff}</span>',
+                    unsafe_allow_html=True
+                )
  
                 with st.form("quiz_form"):
                     for i, q in enumerate(questions):
-                        st.markdown(f'<div class="quiz-card"><div class="quiz-q">Q{i+1}. {q["question"]}</div></div>', unsafe_allow_html=True)
+                        hint = q.get("hint", "")
+                        st.markdown(
+                            f'<div class="quiz-card">'
+                            f'<div class="quiz-q">Q{i+1}. {q["question"]}</div>'
+                            f'{"<div class=\'hint-box\'>💡 Hint: " + hint + "</div>" if hint and curr_diff == "Easy" else ""}'
+                            f'</div>',
+                            unsafe_allow_html=True
+                        )
                         options     = q.get("options", {})
                         option_list = [f"{k}. {v}" for k, v in options.items()]
                         selected    = st.radio(f"Answer Q{i+1}", option_list, key=f"quiz_q_{i}", label_visibility="collapsed")
@@ -713,20 +791,20 @@ def show_main_app():
                             1 for i, q in enumerate(questions)
                             if st.session_state.user_answers.get(i, "").upper() == q.get("answer", "").strip().upper()
                         )
-                        total      = len(questions)
-                        pct        = round((score / total) * 100)
-                        difficulty = st.session_state.get("current_difficulty", "Medium")
+                        total = len(questions)
+                        pct   = round((score / total) * 100)
                         st.session_state.score          = score
                         st.session_state.quiz_submitted = True
                         save_quiz(user_id,
                                   topic_focus.strip() if topic_focus.strip() else "General",
-                                  score, total, pct, difficulty)
+                                  score, total, pct, curr_diff)
                         update_streak(user_id)
  
                 if st.session_state.quiz_submitted:
                     total = len(questions)
                     score = st.session_state.score
                     pct   = round((score / total) * 100)
+ 
                     r1, r2, r3 = st.columns(3)
                     with r1:
                         st.markdown(f'<div class="metric-card"><div class="metric-val">{score}/{total}</div><div class="metric-label">Score</div></div>', unsafe_allow_html=True)
@@ -737,10 +815,12 @@ def show_main_app():
                         grade = "Excellent 🔥" if pct >= 80 else "Good 👍" if pct >= 60 else "Needs Work 📖"
                         st.markdown(f'<div class="metric-card"><div class="metric-val" style="font-size:16px">{grade}</div><div class="metric-label">Grade</div></div>', unsafe_allow_html=True)
  
-                    next_diff   = get_adaptive_difficulty(user_id, topic_focus.strip() if topic_focus.strip() else "General")
-                    diff_colors = {"Easy": "badge-easy", "Medium": "badge-medium", "Hard": "badge-hard"}
+                    next_diff = get_adaptive_difficulty(user_id, topic_focus.strip() if topic_focus.strip() else "General")
                     st.markdown(
-                        f'<div style="margin:12px 0">Next quiz difficulty: <span class="badge {diff_colors[next_diff]}">{next_diff}</span></div>',
+                        f'<div style="margin:12px 0;padding:10px 14px;background:#faf8f4;border-radius:8px;border-left:3px solid #f59e0b">'
+                        f'<span style="color:#64748b;font-size:13px">📊 Based on your performance, next quiz will be: </span>'
+                        f'<span class="badge {diff_colors.get(next_diff,"badge-medium")}">{next_diff}</span>'
+                        f'</div>',
                         unsafe_allow_html=True
                     )
  
@@ -764,7 +844,6 @@ def show_main_app():
         # ════════════════════════════════════════
         elif mode == "📅 Study Plan":
             st.markdown("## 📅 Personalized Study Plan")
-            st.markdown('<p style="color:#64748b">PrepAI analyzes your PDF and builds a day-by-day plan tailored to your weak areas.</p>', unsafe_allow_html=True)
  
             existing_plan = get_latest_study_plan(user_id)
             if existing_plan and not st.session_state.get("study_plan"):
@@ -783,10 +862,7 @@ def show_main_app():
             if st.button("Generate New Study Plan →", use_container_width=True):
                 with st.spinner("Building your personalized plan..."):
                     split_docs = st.session_state.get("split_docs", all_docs)
-                    plan = generate_study_plan(
-                        split_docs, num_days=num_days,
-                        weak_topics=topics if topics else None
-                    )
+                    plan = generate_study_plan(split_docs, num_days=num_days, weak_topics=topics if topics else None)
                     if plan:
                         plan_id = save_study_plan(user_id, plan.get("plan_title", "Study Plan"), plan)
                         st.session_state.study_plan      = plan
@@ -823,7 +899,7 @@ def show_main_app():
                     di             = {"Easy": "🟢", "Medium": "🟡", "Hard": "🔴"}.get(diff, "🟡")
                     topics_html    = "".join(f'<span class="day-topic-chip">{t}</span>' for t in day_data.get("topics", []))
                     questions_html = "".join(f'<div class="day-q">❓ {q}</div>' for q in day_data.get("suggested_questions", []))
-                    done_badge     = ' <span style="color:#059669;font-size:13px;font-weight:700">✅ Completed</span>' if is_done else ""
+                    done_badge     = ' <span style="color:#059669;font-size:13px;font-weight:700">✅ Done</span>' if is_done else ""
  
                     st.markdown(
                         f'<div class="{cc}">'
@@ -857,7 +933,6 @@ def show_main_app():
         # ════════════════════════════════════════
         elif mode == "📈 Analytics":
             st.markdown("## 📈 Analytics Dashboard")
- 
             has_data = bool(topics) or bool(quiz_history) or bool(question_log)
  
             if not has_data:
@@ -892,19 +967,9 @@ def show_main_app():
                         t_names  = [t[0] for t in sorted_t]
                         t_counts = [t[1] for t in sorted_t]
                         colors   = ["#dc2626" if c >= 3 else "#d97706" if c >= 2 else "#0a1628" for c in t_counts]
-                        fig = go.Figure(go.Bar(
-                            x=t_counts, y=t_names, orientation='h',
-                            marker_color=colors, text=t_counts, textposition='outside'
-                        ))
-                        fig.update_layout(
-                            paper_bgcolor='#ffffff', plot_bgcolor='#ffffff',
-                            font=dict(color='#334155'),
-                            xaxis=dict(showgrid=False),
-                            yaxis=dict(showgrid=False),
-                            margin=dict(l=10, r=30, t=10, b=10), height=300
-                        )
+                        fig = go.Figure(go.Bar(x=t_counts, y=t_names, orientation='h', marker_color=colors, text=t_counts, textposition='outside'))
+                        fig.update_layout(paper_bgcolor='#ffffff', plot_bgcolor='#ffffff', font=dict(color='#334155'), xaxis=dict(showgrid=False), yaxis=dict(showgrid=False), margin=dict(l=10, r=30, t=10, b=10), height=300)
                         st.plotly_chart(fig, use_container_width=True)
-                        st.caption("🔴 Red = high weakness · 🟡 Yellow = moderate · 🔵 Navy = once")
  
                 with cr:
                     st.markdown("### Quiz Score History")
@@ -914,25 +979,11 @@ def show_main_app():
                         diff_color_map = {"Easy": "#059669", "Medium": "#d97706", "Hard": "#dc2626"}
                         marker_colors  = [diff_color_map.get(q.get("difficulty", "Medium"), "#0a1628") for q in quiz_history]
                         fig2 = go.Figure()
-                        fig2.add_trace(go.Scatter(
-                            x=quiz_nums, y=quiz_pcts,
-                            mode='lines+markers+text',
-                            text=[f"{p}%" for p in quiz_pcts],
-                            textposition='top center',
-                            line=dict(color='#0a1628', width=2),
-                            marker=dict(size=10, color=marker_colors)
-                        ))
-                        fig2.add_hline(y=70, line_dash="dash", line_color="#f59e0b",
-                                       opacity=0.6, annotation_text="Pass line (70%)")
-                        fig2.update_layout(
-                            paper_bgcolor='#ffffff', plot_bgcolor='#ffffff',
-                            font=dict(color='#334155'),
-                            xaxis=dict(showgrid=False),
-                            yaxis=dict(showgrid=False, range=[0, 110]),
-                            margin=dict(l=10, r=10, t=10, b=10), height=300
-                        )
+                        fig2.add_trace(go.Scatter(x=quiz_nums, y=quiz_pcts, mode='lines+markers+text', text=[f"{p}%" for p in quiz_pcts], textposition='top center', line=dict(color='#0a1628', width=2), marker=dict(size=10, color=marker_colors)))
+                        fig2.add_hline(y=70, line_dash="dash", line_color="#f59e0b", opacity=0.6, annotation_text="Pass (70%)")
+                        fig2.update_layout(paper_bgcolor='#ffffff', plot_bgcolor='#ffffff', font=dict(color='#334155'), xaxis=dict(showgrid=False), yaxis=dict(showgrid=False, range=[0, 110]), margin=dict(l=10, r=10, t=10, b=10), height=300)
                         st.plotly_chart(fig2, use_container_width=True)
-                        st.caption("🟢 Easy · 🟡 Medium · 🔴 Hard quiz")
+                        st.caption("🟢 Easy · 🟡 Medium · 🔴 Hard")
                     else:
                         st.info("Take a quiz to see score history.")
  
@@ -948,7 +999,7 @@ def show_main_app():
                             f'</div>'
                             f'<div style="margin-top:6px">'
                             f'<span class="topic-badge">{entry["topic"]}</span>'
-                            f'<span style="color:{conf_col};font-size:12px;margin-left:8px;font-weight:600">⚡ {entry["confidence"]}% confidence</span>'
+                            f'<span style="color:{conf_col};font-size:12px;margin-left:8px;font-weight:600">⚡ {round(float(entry["confidence"]),1)}% confidence</span>'
                             f'</div></div>',
                             unsafe_allow_html=True)
  
@@ -969,7 +1020,6 @@ def show_main_app():
                     lines.append(f"  Avg Quiz Score  : {avg_score}%")
                     lines.append(f"  Topics Explored : {topic_count}")
                     lines.append(f"  Flashcards Made : {fc_count}\n")
- 
                     if topics:
                         lines.append("WEAK TOPICS")
                         lines.append("-" * 40)
@@ -977,42 +1027,32 @@ def show_main_app():
                             level = "HIGH" if c >= 3 else "MEDIUM" if c >= 2 else "LOW"
                             lines.append(f"  [{level}] {t} — asked {c} time(s)")
                         lines.append("")
- 
                     if quiz_history:
                         lines.append("QUIZ HISTORY")
                         lines.append("-" * 40)
                         for i, qh in enumerate(quiz_history):
                             lines.append(f"  Quiz {i+1}: {qh['score']}/{qh['total']} ({qh['pct']}%) [{qh.get('difficulty','Medium')}] — {qh['topic']}")
                         lines.append("")
- 
                     lines.append("=" * 60)
                     lines.append("     Keep studying. PrepAI believes in you!")
                     lines.append("=" * 60)
- 
                     report_text = "\n".join(lines)
-                    st.download_button(
-                        label="Click to download",
-                        data=report_text,
-                        file_name=f"PrepAI_Report_{user['username']}_{datetime.now().strftime('%Y%m%d')}.txt",
-                        mime="text/plain",
-                        use_container_width=True
-                    )
+                    st.download_button(label="Click to download", data=report_text, file_name=f"PrepAI_Report_{user['username']}_{datetime.now().strftime('%Y%m%d')}.txt", mime="text/plain", use_container_width=True)
  
         # ════════════════════════════════════════
-        # MODE 5 — FLASHCARDS ← NEW
+        # MODE 5 — FLASHCARDS
         # ════════════════════════════════════════
         elif mode == "🃏 Flashcards":
             st.markdown("## 🃏 Flashcard Review")
-            st.caption("Flashcards are auto-generated every time you ask a question in Study Chat.")
+            st.caption("Auto-generated from your Study Chat questions using spaced repetition.")
  
             flashcards = st.session_state.flashcards
- 
             if not flashcards:
-                st.info("No flashcards yet — ask a question in Study Chat and flashcards will be generated automatically!")
+                st.info("No flashcards yet — ask a question in Study Chat and flashcards will be auto-generated!")
             else:
                 total_fc  = len(flashcards)
-                got_it    = sum(1 for i, s in st.session_state.flashcard_status.items() if s == "got_it")
-                review    = sum(1 for i, s in st.session_state.flashcard_status.items() if s == "review")
+                got_it    = sum(1 for s in st.session_state.flashcard_status.values() if s == "got_it")
+                review    = sum(1 for s in st.session_state.flashcard_status.values() if s == "review")
                 remaining = total_fc - len(st.session_state.flashcard_status)
  
                 fc1, fc2, fc3, fc4 = st.columns(4)
@@ -1026,27 +1066,8 @@ def show_main_app():
                     st.markdown(f'<div class="metric-card"><div class="metric-val" style="color:#d97706">{remaining}</div><div class="metric-label">Remaining</div></div>', unsafe_allow_html=True)
  
                 st.markdown("<br>", unsafe_allow_html=True)
- 
-                # Navigation
-                idx = st.session_state.current_fc_index
-                if idx >= total_fc:
-                    idx = 0
-                    st.session_state.current_fc_index = 0
- 
+                idx = st.session_state.current_fc_index % total_fc
                 card = flashcards[idx]
- 
-                st.markdown(f"**Card {idx + 1} of {total_fc}**")
- 
-                # Progress bar
-                prog = round((idx / total_fc) * 100)
-                st.markdown(
-                    f'<div class="progress-bar-bg"><div class="progress-bar" style="width:{prog}%"></div></div>',
-                    unsafe_allow_html=True
-                )
- 
-                st.markdown("<br>", unsafe_allow_html=True)
- 
-                # Card display
                 status = st.session_state.flashcard_status.get(idx, "")
                 status_badge = ""
                 if status == "got_it":
@@ -1054,20 +1075,19 @@ def show_main_app():
                 elif status == "review":
                     status_badge = '<span style="color:#dc2626;font-weight:700">🔄 Review again</span>'
  
-                st.markdown(
-                    f'<div class="flashcard-front">'
-                    f'<div class="flashcard-front-text">{card.get("front", "")}</div>'
-                    f'</div>'
-                    f'<div class="flashcard-back">'
-                    f'<div class="flashcard-back-text">{card.get("back", "")}</div>'
-                    f'<div class="flashcard-topic">📌 {card.get("topic", "General")} &nbsp; {status_badge}</div>'
-                    f'</div>',
-                    unsafe_allow_html=True
-                )
- 
+                st.markdown(f"**Card {idx + 1} of {total_fc}**")
+                prog = round((idx / total_fc) * 100)
+                st.markdown(f'<div class="progress-bar-bg"><div class="progress-bar" style="width:{prog}%"></div></div>', unsafe_allow_html=True)
                 st.markdown("<br>", unsafe_allow_html=True)
  
-                # Action buttons
+                st.markdown(
+                    f'<div class="flashcard-front"><div class="flashcard-front-text">{card.get("front","")}</div></div>'
+                    f'<div class="flashcard-back"><div class="flashcard-back-text">{card.get("back","")}</div>'
+                    f'<div class="flashcard-topic">📌 {card.get("topic","General")} &nbsp; {status_badge}</div></div>',
+                    unsafe_allow_html=True
+                )
+                st.markdown("<br>", unsafe_allow_html=True)
+ 
                 b1, b2, b3, b4 = st.columns(4)
                 with b1:
                     if st.button("← Previous", use_container_width=True):
@@ -1088,7 +1108,6 @@ def show_main_app():
                         st.session_state.current_fc_index = min(total_fc - 1, idx + 1)
                         st.rerun()
  
-                # Show cards needing review
                 review_cards = [i for i, s in st.session_state.flashcard_status.items() if s == "review"]
                 if review_cards:
                     st.markdown("---")
@@ -1097,28 +1116,280 @@ def show_main_app():
                         c = flashcards[i]
                         st.markdown(
                             f'<div class="quiz-card" style="padding:12px 16px">'
-                            f'<div style="color:#dc2626;font-size:13px;font-weight:600">{c.get("front", "")}</div>'
-                            f'<div style="color:#64748b;font-size:12px;margin-top:6px">{c.get("back", "")}</div>'
+                            f'<div style="color:#dc2626;font-size:13px;font-weight:600">{c.get("front","")}</div>'
+                            f'<div style="color:#64748b;font-size:12px;margin-top:6px">{c.get("back","")}</div>'
                             f'</div>',
                             unsafe_allow_html=True
                         )
  
                 if st.button("🔁 Reset All Cards", use_container_width=True):
-                    st.session_state.flashcard_status  = {}
-                    st.session_state.current_fc_index  = 0
+                    st.session_state.flashcard_status = {}
+                    st.session_state.current_fc_index = 0
                     st.rerun()
+ 
+        # ════════════════════════════════════════
+        # MODE 6 — CONCEPT MAP ← NEW TIER 2
+        # ════════════════════════════════════════
+        elif mode == "🗺️ Concept Map":
+            st.markdown("## 🗺️ Concept Map")
+            st.caption("Visual network showing how concepts in your PDF connect to each other.")
+ 
+            if st.session_state.concept_map is None:
+                if st.button("🗺️ Generate Concept Map", use_container_width=True):
+                    with st.spinner("Analyzing concepts and building map..."):
+                        concept_data = generate_concept_map(st.session_state.split_docs)
+                        st.session_state.concept_map = concept_data
+            else:
+                if st.button("🔄 Regenerate Map", use_container_width=True):
+                    with st.spinner("Rebuilding concept map..."):
+                        concept_data = generate_concept_map(st.session_state.split_docs)
+                        st.session_state.concept_map = concept_data
+ 
+            if st.session_state.concept_map:
+                concept_data = st.session_state.concept_map
+                nodes = concept_data.get("nodes", [])
+                edges = concept_data.get("edges", [])
+ 
+                # Stats row
+                c1, c2, c3 = st.columns(3)
+                with c1:
+                    st.markdown(f'<div class="metric-card"><div class="metric-val">{len(nodes)}</div><div class="metric-label">Concepts</div></div>', unsafe_allow_html=True)
+                with c2:
+                    st.markdown(f'<div class="metric-card"><div class="metric-val">{len(edges)}</div><div class="metric-label">Connections</div></div>', unsafe_allow_html=True)
+                with c3:
+                    main_nodes = [n for n in nodes if n.get("category") == "main"]
+                    st.markdown(f'<div class="metric-card"><div class="metric-val">{len(main_nodes)}</div><div class="metric-label">Core Topics</div></div>', unsafe_allow_html=True)
+ 
+                st.markdown("<br>", unsafe_allow_html=True)
+ 
+                # Render the map
+                fig = render_concept_map(concept_data)
+                if fig:
+                    st.plotly_chart(fig, use_container_width=True)
+ 
+                # Legend
+                st.markdown(
+                    '<div style="display:flex;gap:16px;margin-top:8px">'
+                    '<span><span style="display:inline-block;width:12px;height:12px;background:#0a1628;border-radius:50%;margin-right:6px"></span><span style="color:#64748b;font-size:12px">Core Topic</span></span>'
+                    '<span><span style="display:inline-block;width:12px;height:12px;background:#f59e0b;border-radius:50%;margin-right:6px"></span><span style="color:#64748b;font-size:12px">Subtopic</span></span>'
+                    '<span><span style="display:inline-block;width:12px;height:12px;background:#94a3b8;border-radius:50%;margin-right:6px"></span><span style="color:#64748b;font-size:12px">Concept Detail</span></span>'
+                    '</div>',
+                    unsafe_allow_html=True
+                )
+ 
+                # Connections list
+                if edges:
+                    st.markdown("### 🔗 Concept Relationships")
+                    node_label_map = {n["id"]: n["label"] for n in nodes}
+                    for edge in edges:
+                        src_label = node_label_map.get(edge.get("source"), edge.get("source", ""))
+                        tgt_label = node_label_map.get(edge.get("target"), edge.get("target", ""))
+                        rel       = edge.get("relationship", "relates to")
+                        st.markdown(
+                            f'<div style="padding:8px 14px;margin:4px 0;background:#ffffff;border:1px solid #e2e8f0;border-radius:8px;font-size:13px;color:#334155">'
+                            f'<b style="color:#0a1628">{src_label}</b> '
+                            f'<span style="color:#f59e0b;font-style:italic"> {rel} </span>'
+                            f'<b style="color:#0a1628">{tgt_label}</b>'
+                            f'</div>',
+                            unsafe_allow_html=True
+                        )
+            else:
+                st.info("Click 'Generate Concept Map' to visualize how concepts in your PDF connect.")
+ 
+        # ════════════════════════════════════════
+        # MODE 7 — EXAM MODE ← NEW TIER 2
+        # ════════════════════════════════════════
+        elif mode == "📝 Exam Mode":
+            st.markdown("## 📝 Exam Mode")
+            st.caption("Timed mock exam with MCQs and short answer questions. Auto-submits when time runs out.")
+ 
+            if st.session_state.exam_data is None:
+                # Exam setup
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    num_mcq = st.selectbox("MCQ Questions", [5, 10, 15], index=1)
+                with col2:
+                    num_short = st.selectbox("Short Answer Questions", [2, 3, 5], index=1)
+                with col3:
+                    exam_duration = st.selectbox("Time Limit (minutes)", [15, 30, 45, 60], index=1)
+ 
+                exam_diff = st.selectbox("Difficulty", ["Easy", "Medium", "Hard"], index=1)
+ 
+                st.markdown(
+                    f'<div style="background:#faf8f4;border-radius:8px;padding:12px 16px;border-left:3px solid #0a1628;margin:12px 0">'
+                    f'<b style="color:#0a1628">Exam Summary:</b> '
+                    f'<span style="color:#334155">{num_mcq} MCQs + {num_short} Short Answers · {exam_duration} minutes · {exam_diff} difficulty · Total: {num_mcq + (num_short * 5)} marks</span>'
+                    f'</div>',
+                    unsafe_allow_html=True
+                )
+ 
+                if st.button("🚀 Start Exam", use_container_width=True):
+                    with st.spinner("Generating your exam paper..."):
+                        docs, _, _ = retrieve_with_scores(db, "all important topics", k=6)
+                        exam = generate_exam(docs, num_mcq=num_mcq, num_short=num_short, difficulty=exam_diff)
+                        if exam:
+                            st.session_state.exam_data      = exam
+                            st.session_state.exam_answers   = {}
+                            st.session_state.short_answers  = {}
+                            st.session_state.exam_submitted = False
+                            st.session_state.exam_start_time = time.time()
+                            st.session_state.exam_duration  = exam_duration
+                            st.rerun()
+                        else:
+                            st.error("Failed to generate exam. Try again.")
+ 
+            else:
+                exam = st.session_state.exam_data
+ 
+                # Auto-submit check
+                if not st.session_state.exam_submitted:
+                    elapsed  = time.time() - st.session_state.exam_start_time
+                    duration = st.session_state.exam_duration * 60
+                    remaining_secs = max(0, duration - elapsed)
+                    mins = int(remaining_secs // 60)
+                    secs = int(remaining_secs % 60)
+                    is_danger = remaining_secs < 120
+ 
+                    timer_color = "#dc2626" if is_danger else "#f59e0b"
+                    st.markdown(
+                        f'<div class="exam-timer">'
+                        f'<div class="exam-timer-val" style="color:{timer_color}">{mins:02d}:{secs:02d}</div>'
+                        f'<div class="exam-timer-label">{"⚠️ TIME RUNNING OUT!" if is_danger else "Time Remaining"}</div>'
+                        f'</div>',
+                        unsafe_allow_html=True
+                    )
+ 
+                    if remaining_secs <= 0:
+                        st.session_state.exam_submitted = True
+                        st.warning("⏰ Time is up! Exam auto-submitted.")
+                        st.rerun()
+ 
+                st.markdown(f"### 📄 {exam.get('exam_title', 'Mock Exam')}")
+                st.markdown(
+                    f'<div style="display:flex;gap:16px;margin-bottom:16px">'
+                    f'<span class="badge badge-{exam.get("difficulty","Medium").lower()}">{exam.get("difficulty","Medium")}</span>'
+                    f'<span style="color:#64748b;font-size:13px">Total Marks: {exam.get("total_marks","?")}</span>'
+                    f'</div>',
+                    unsafe_allow_html=True
+                )
+ 
+                if not st.session_state.exam_submitted:
+                    # MCQ Section
+                    mcqs = exam.get("mcqs", [])
+                    if mcqs:
+                        st.markdown("#### Section A — Multiple Choice Questions")
+                        with st.form("exam_form"):
+                            for q in mcqs:
+                                qid = q.get("id", 0)
+                                st.markdown(
+                                    f'<div class="quiz-card">'
+                                    f'<div class="quiz-q">Q{qid}. {q["question"]} <span style="color:#94a3b8;font-size:11px">({q.get("marks",1)} mark)</span></div>'
+                                    f'</div>',
+                                    unsafe_allow_html=True
+                                )
+                                options     = q.get("options", {})
+                                option_list = [f"{k}. {v}" for k, v in options.items()]
+                                selected    = st.radio(f"MCQ {qid}", option_list, key=f"exam_mcq_{qid}", label_visibility="collapsed")
+                                if selected:
+                                    st.session_state.exam_answers[qid] = selected[0]
+ 
+                            # Short Answer Section
+                            short_qs = exam.get("short_answers", [])
+                            if short_qs:
+                                st.markdown("#### Section B — Short Answer Questions")
+                                for q in short_qs:
+                                    qid = q.get("id", 0)
+                                    st.markdown(
+                                        f'<div class="short-answer-card">'
+                                        f'<div class="quiz-q">Q{len(mcqs)+qid}. {q["question"]} <span style="color:#94a3b8;font-size:11px">({q.get("marks",5)} marks)</span></div>'
+                                        f'</div>',
+                                        unsafe_allow_html=True
+                                    )
+                                    answer = st.text_area(f"Your answer for Q{len(mcqs)+qid}", key=f"exam_short_{qid}", placeholder="Write your answer here...", height=120)
+                                    if answer:
+                                        st.session_state.short_answers[qid] = answer
+ 
+                            if st.form_submit_button("✅ Submit Exam", use_container_width=True):
+                                st.session_state.exam_submitted = True
+                                st.rerun()
+ 
+                else:
+                    # Results
+                    mcqs      = exam.get("mcqs", [])
+                    short_qs  = exam.get("short_answers", [])
+                    mcq_score = sum(
+                        q.get("marks", 1) for q in mcqs
+                        if st.session_state.exam_answers.get(q.get("id", 0), "").upper() == q.get("answer", "").strip().upper()
+                    )
+                    total_mcq_marks   = sum(q.get("marks", 1) for q in mcqs)
+                    total_short_marks = sum(q.get("marks", 5) for q in short_qs)
+                    total_marks       = exam.get("total_marks", total_mcq_marks + total_short_marks)
+                    pct = round((mcq_score / total_mcq_marks) * 100) if total_mcq_marks else 0
+ 
+                    st.markdown("## 📊 Exam Results")
+                    r1, r2, r3 = st.columns(3)
+                    with r1:
+                        st.markdown(f'<div class="metric-card"><div class="metric-val">{mcq_score}/{total_mcq_marks}</div><div class="metric-label">MCQ Score</div></div>', unsafe_allow_html=True)
+                    with r2:
+                        col = "#059669" if pct >= 70 else "#d97706" if pct >= 40 else "#dc2626"
+                        st.markdown(f'<div class="metric-card"><div class="metric-val" style="color:{col}">{pct}%</div><div class="metric-label">MCQ Percentage</div></div>', unsafe_allow_html=True)
+                    with r3:
+                        grade = "Distinction 🏆" if pct >= 80 else "Pass ✅" if pct >= 50 else "Fail ❌"
+                        st.markdown(f'<div class="metric-card"><div class="metric-val" style="font-size:16px">{grade}</div><div class="metric-label">Grade</div></div>', unsafe_allow_html=True)
+ 
+                    st.markdown("### MCQ Review")
+                    for q in mcqs:
+                        qid          = q.get("id", 0)
+                        correct      = q.get("answer", "").strip().upper()
+                        user_ans     = st.session_state.exam_answers.get(qid, "").strip().upper()
+                        icon         = "✅" if user_ans == correct else "❌"
+                        correct_text = q.get("options", {}).get(correct, correct)
+                        explanation  = q.get("explanation", "")
+                        rc           = "correct-ans" if user_ans == correct else "wrong-ans"
+                        st.markdown(
+                            f'<div class="quiz-card">'
+                            f'<div class="quiz-q">{icon} Q{qid}. {q["question"]}</div>'
+                            f'<div class="{rc}">Your: {user_ans} | Correct: {correct}. {correct_text}</div>'
+                            f'{"<div class=\'explanation\'>💡 " + explanation + "</div>" if explanation else ""}'
+                            f'</div>', unsafe_allow_html=True)
+ 
+                    if short_qs:
+                        st.markdown("### Short Answer Model Answers")
+                        for q in short_qs:
+                            qid          = q.get("id", 0)
+                            user_answer  = st.session_state.short_answers.get(qid, "No answer provided")
+                            model_answer = q.get("model_answer", "")
+                            key_points   = q.get("key_points", [])
+                            key_pts_html = "".join(f'<div class="key-point">✓ {p}</div>' for p in key_points)
+                            st.markdown(
+                                f'<div class="short-answer-card">'
+                                f'<div class="quiz-q">{q["question"]}</div>'
+                                f'<div style="margin:10px 0"><b style="color:#64748b;font-size:12px">YOUR ANSWER:</b><div style="color:#334155;font-size:13px;margin-top:4px">{user_answer}</div></div>'
+                                f'<div style="margin:10px 0"><b style="color:#64748b;font-size:12px">KEY POINTS TO COVER:</b>{key_pts_html}</div>'
+                                f'<div style="margin:10px 0"><b style="color:#64748b;font-size:12px">MODEL ANSWER:</b><div style="color:#334155;font-size:13px;margin-top:4px">{model_answer}</div></div>'
+                                f'</div>', unsafe_allow_html=True)
+ 
+                    if st.button("🔄 Take New Exam", use_container_width=True):
+                        st.session_state.exam_data      = None
+                        st.session_state.exam_answers   = {}
+                        st.session_state.short_answers  = {}
+                        st.session_state.exam_submitted = False
+                        st.session_state.exam_start_time = None
+                        st.rerun()
  
     else:
         st.markdown("### 👆 Upload a PDF to get started")
-        c1, c2, c3, c4, c5 = st.columns(5)
+        c1, c2, c3, c4, c5, c6, c7 = st.columns(7)
         cards = [
-            ("💬", "Study Chat", "Ask questions with voice input and get structured answers."),
-            ("🧪", "Test Mode",  "Adaptive MCQ quizzes based on your performance."),
-            ("📅", "Study Plan", "Personalized plan built from your PDF."),
-            ("📈", "Analytics",  "Track topics, scores, streaks, and export reports."),
-            ("🃏", "Flashcards", "Auto-generated spaced repetition cards from your answers."),
+            ("💬", "Study Chat", "Voice-enabled Q&A with structured answers."),
+            ("🧪", "Test Mode",  "Adaptive difficulty MCQ quizzes."),
+            ("📅", "Study Plan", "Personalized day-by-day plan."),
+            ("📈", "Analytics",  "Track topics, scores and streaks."),
+            ("🃏", "Flashcards", "Auto-generated spaced repetition cards."),
+            ("🗺️", "Concept Map", "Visual network of how topics connect."),
+            ("📝", "Exam Mode",  "Timed mock exam with auto-submit."),
         ]
-        for col, (icon, title, desc) in zip([c1, c2, c3, c4, c5], cards):
+        for col, (icon, title, desc) in zip([c1, c2, c3, c4, c5, c6, c7], cards):
             with col:
                 st.markdown(
                     f'<div class="feature-card">'
