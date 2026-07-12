@@ -37,6 +37,12 @@ except ImportError:
     NX_AVAILABLE = False
  
  
+# ── LIMITS ────────────────────────────────────────
+MAX_PDFS        = 5
+MAX_PDF_SIZE_MB = 20
+MAX_PAGES       = 100
+ 
+ 
 llm = ChatOpenAI(model="gpt-4o-mini", temperature=0, api_key=api_key)
  
  
@@ -76,22 +82,22 @@ def build_bm25_index(docs):
 # RECIPROCAL RANK FUSION
 # ───────────────────────────────────────────────
 def reciprocal_rank_fusion(faiss_docs, bm25_docs, k=60):
-    scores = {}
+    scores  = {}
     doc_map = {}
     for rank, doc in enumerate(faiss_docs):
         key = doc.page_content[:120]
-        scores[key] = scores.get(key, 0) + (1 / (k + rank + 1))
+        scores[key]  = scores.get(key, 0) + (1 / (k + rank + 1))
         doc_map[key] = doc
     for rank, doc in enumerate(bm25_docs):
         key = doc.page_content[:120]
-        scores[key] = scores.get(key, 0) + (1 / (k + rank + 1))
+        scores[key]  = scores.get(key, 0) + (1 / (k + rank + 1))
         doc_map[key] = doc
     sorted_keys = sorted(scores, key=lambda x: scores[x], reverse=True)
     return [doc_map[k] for k in sorted_keys]
  
  
 # ───────────────────────────────────────────────
-# HYBRID RETRIEVAL
+# SINGLE PDF HYBRID RETRIEVAL
 # ───────────────────────────────────────────────
 def hybrid_retrieve(db, bm25_index, all_docs, query, k=4):
     try:
@@ -121,10 +127,10 @@ def hybrid_retrieve(db, bm25_index, all_docs, query, k=4):
  
 def retrieve_with_scores(db, query, k=3):
     try:
-        results       = db.similarity_search_with_score(query, k=k)
-        docs          = [r[0] for r in results]
-        scores        = [r[1] for r in results]
-        similarities  = [round((1 / (1 + s)) * 100, 1) for s in scores]
+        results        = db.similarity_search_with_score(query, k=k)
+        docs           = [r[0] for r in results]
+        scores         = [r[1] for r in results]
+        similarities   = [round((1 / (1 + s)) * 100, 1) for s in scores]
         avg_confidence = round(sum(similarities) / len(similarities), 1)
         return docs, avg_confidence, similarities
     except:
@@ -133,7 +139,131 @@ def retrieve_with_scores(db, query, k=3):
  
  
 # ───────────────────────────────────────────────
-# SOURCE PAGES
+# TIER 3 — MULTI-PDF INDEXING ← NEW
+# ───────────────────────────────────────────────
+def validate_pdf(file_bytes, filename):
+    """
+    Validates PDF before processing.
+    Returns (is_valid, error_message)
+    """
+    size_mb = len(file_bytes) / (1024 * 1024)
+    if size_mb > MAX_PDF_SIZE_MB:
+        return False, f"{filename} is {size_mb:.1f}MB — maximum allowed is {MAX_PDF_SIZE_MB}MB"
+    return True, ""
+ 
+ 
+def build_pdf_index(file_bytes, filename):
+    """
+    Builds FAISS + BM25 index for a single PDF.
+    Returns index dict with all needed components.
+    """
+    tmp_path = f"tmp_{filename.replace(' ', '_')}"
+    with open(tmp_path, "wb") as f:
+        f.write(file_bytes)
+ 
+    try:
+        docs       = load_pdf(tmp_path)
+        split_docs = split_text(docs)
+ 
+        # Enforce page limit
+        if len(docs) > MAX_PAGES:
+            docs       = docs[:MAX_PAGES]
+            split_docs = split_text(docs)
+ 
+        db          = create_db(split_docs)
+        bm25, all_d = build_bm25_index(split_docs)
+ 
+        return {
+            "filename":   filename,
+            "db":         db,
+            "bm25":       bm25,
+            "all_docs":   all_d,
+            "split_docs": split_docs,
+            "page_count": len(docs),
+            "chunk_count": len(split_docs),
+        }
+    finally:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+ 
+ 
+# ───────────────────────────────────────────────
+# TIER 3 — MULTI-PDF RETRIEVAL ← NEW
+# Searches ALL uploaded PDFs simultaneously
+# Tags each result with source PDF name
+# ───────────────────────────────────────────────
+def multi_pdf_retrieve(pdf_indexes, query, k_per_pdf=3):
+    """
+    Searches across all PDF indexes simultaneously.
+    Returns merged results tagged with source PDF.
+ 
+    Each returned doc has metadata:
+    - source_pdf: filename of the PDF
+    - page: page number
+    """
+    all_results = []
+ 
+    for idx in pdf_indexes:
+        db        = idx["db"]
+        bm25      = idx["bm25"]
+        all_docs  = idx["all_docs"]
+        filename  = idx["filename"]
+ 
+        try:
+            # FAISS search
+            faiss_results = db.similarity_search_with_score(query, k=k_per_pdf)
+            faiss_docs    = [r[0] for r in faiss_results]
+            faiss_scores  = [r[1] for r in faiss_results]
+ 
+            # BM25 search
+            if BM25_AVAILABLE and bm25 is not None:
+                tokenized = query.lower().split()
+                bm25_sc   = bm25.get_scores(tokenized)
+                top_idx   = sorted(range(len(bm25_sc)),
+                                   key=lambda i: bm25_sc[i], reverse=True)[:k_per_pdf]
+                bm25_docs = [all_docs[i] for i in top_idx]
+                combined  = reciprocal_rank_fusion(faiss_docs, bm25_docs)[:k_per_pdf]
+            else:
+                combined = faiss_docs
+ 
+            # Tag each doc with source PDF
+            for rank, doc in enumerate(combined):
+                score = faiss_scores[rank] if rank < len(faiss_scores) else 1.0
+                confidence = round((1 / (1 + score)) * 100, 1)
+                doc.metadata["source_pdf"] = filename
+                all_results.append({
+                    "doc":        doc,
+                    "confidence": confidence,
+                    "source_pdf": filename,
+                    "rank":       rank
+                })
+ 
+        except Exception as e:
+            continue
+ 
+    # Sort all results by confidence across PDFs
+    all_results.sort(key=lambda x: x["confidence"], reverse=True)
+ 
+    # Take top k overall
+    top_results = all_results[:6]
+    docs        = [r["doc"] for r in top_results]
+    avg_conf    = round(sum(r["confidence"] for r in top_results) / len(top_results), 1) if top_results else 65.0
+ 
+    # Build source map: PDF → pages
+    source_map = {}
+    for r in top_results:
+        pdf_name = r["source_pdf"]
+        page     = r["doc"].metadata.get("page", 0) + 1
+        if pdf_name not in source_map:
+            source_map[pdf_name] = []
+        if page not in source_map[pdf_name]:
+            source_map[pdf_name].append(page)
+ 
+    return docs, avg_conf, source_map
+ 
+ 
+# ───────────────────────────────────────────────
+# SOURCE PAGES (single PDF)
 # ───────────────────────────────────────────────
 def get_sources(docs):
     pages = []
@@ -153,7 +283,7 @@ Question: {query}
 Reply with ONLY the topic name, nothing else."""
     try:
         response = llm.invoke(prompt)
-        topic = response.content.strip().strip('"').strip("'")
+        topic    = response.content.strip().strip('"').strip("'")
         return topic if topic else "General"
     except:
         return "General"
@@ -173,10 +303,14 @@ def is_safe_query(query):
  
  
 # ───────────────────────────────────────────────
-# GENERATE ANSWER
+# GENERATE ANSWER (supports multi-PDF context)
 # ───────────────────────────────────────────────
 def generate_answer(query, docs, memory=None):
-    context = "\n\n".join([d.page_content for d in docs])
+    context = "\n\n".join([
+        f"[Source: {d.metadata.get('source_pdf', 'Document')}]\n{d.page_content}"
+        for d in docs
+    ])
+ 
     history_str = ""
     if memory:
         messages = memory.messages[-6:]
@@ -193,13 +327,14 @@ Rules:
 - Answer ONLY from the provided context
 - If not found say: "This topic is not covered in the uploaded material."
 - Be educational and clear
+- If context comes from multiple documents, synthesize the information
  
 {"Previous conversation:" + chr(10) + history_str + chr(10) if history_str else ""}
  
-Context:
+Context from PDF(s):
 {context}
  
-Question: {query}
+Student Question: {query}
  
 Provide a structured answer:
 **2 Marks (brief):** ...
@@ -218,9 +353,9 @@ def local_evaluate(query, answer, docs):
     answer_lower = answer.lower()
     query_lower  = query.lower()
  
-    stop_words = {"what", "is", "the", "a", "an", "of", "in", "and",
-                  "to", "how", "why", "when", "where", "which", "are",
-                  "does", "do", "its", "it", "was", "be", "with", "for"}
+    stop_words = {"what","is","the","a","an","of","in","and","to","how",
+                  "why","when","where","which","are","does","do","its",
+                  "it","was","be","with","for"}
  
     sentences = [s.strip() for s in answer.split('.') if len(s.strip()) > 20]
     if sentences:
@@ -261,13 +396,11 @@ def full_ragas_evaluate(query, answer, docs):
         return local_evaluate(query, answer, docs)
     try:
         contexts = [doc.page_content for doc in docs]
-        data = {
-            "question": [query], "answer": [answer],
-            "contexts": [contexts], "ground_truth": [answer]
-        }
-        dataset = Dataset.from_dict(data)
-        result  = ragas_eval(dataset,
-                             metrics=[faithfulness, answer_relevancy, context_precision])
+        data     = {"question": [query], "answer": [answer],
+                    "contexts": [contexts], "ground_truth": [answer]}
+        dataset  = Dataset.from_dict(data)
+        result   = ragas_eval(dataset,
+                              metrics=[faithfulness, answer_relevancy, context_precision])
         return {
             "faithfulness":      round(result["faithfulness"] * 100, 1),
             "answer_relevancy":  round(result["answer_relevancy"] * 100, 1),
@@ -285,21 +418,14 @@ def evaluate_answer(query, answer, docs):
  
  
 # ───────────────────────────────────────────────
-# TIER 1 — FLASHCARD GENERATOR
+# FLASHCARD GENERATOR
 # ───────────────────────────────────────────────
 def generate_flashcards(query, answer, docs, num_cards=5):
     context = "\n\n".join([d.page_content for d in docs])
-    prompt = f"""You are an expert study coach creating flashcards.
+    prompt  = f"""You are an expert study coach creating flashcards.
 Create {num_cards} flashcards based on the question and answer.
- 
 Return ONLY a valid JSON array:
-[
-  {{
-    "front": "Short concept or question (max 15 words)",
-    "back": "Clear concise explanation (max 50 words)",
-    "topic": "Topic name"
-  }}
-]
+[{{"front":"Short concept (max 15 words)","back":"Clear explanation (max 50 words)","topic":"Topic name"}}]
  
 Question: {query}
 Answer: {answer[:1000]}
@@ -326,28 +452,18 @@ Context: {context[:500]}"""
  
  
 # ───────────────────────────────────────────────
-# TIER 1 — DOCUMENT INTELLIGENCE
+# DOCUMENT INTELLIGENCE
 # ───────────────────────────────────────────────
 def analyze_document(docs):
-    sample  = docs[:20] if len(docs) > 20 else docs
-    context = "\n\n".join([d.page_content for d in sample])
+    sample      = docs[:20] if len(docs) > 20 else docs
+    context     = "\n\n".join([d.page_content for d in sample])
     total_pages = max([d.metadata.get("page", 0) for d in docs]) + 1 if docs else 1
  
-    prompt = f"""Analyze this study material and return a structured report.
+    prompt = f"""Analyze this study material.
 Return ONLY a valid JSON object:
-{{
-  "summary": "2-3 sentence overview",
-  "key_topics": ["Topic 1", "Topic 2", "Topic 3", "Topic 4", "Topic 5"],
-  "difficulty": "Beginner",
-  "estimated_hours": 3,
-  "total_concepts": 12,
-  "suggested_question": "Specific question about this material"
-}}
- 
+{{"summary":"2-3 sentence overview","key_topics":["T1","T2","T3","T4","T5"],"difficulty":"Beginner","estimated_hours":3,"total_concepts":12,"suggested_question":"Specific question"}}
 difficulty must be: "Beginner", "Intermediate", or "Advanced"
- 
-Study Material:
-{context}"""
+Study Material: {context}"""
  
     response = llm.invoke(prompt)
     raw = response.content.strip()
@@ -378,30 +494,26 @@ Study Material:
             "difficulty": "Intermediate",
             "estimated_hours": 3,
             "total_concepts": len(docs),
-            "suggested_question": "What are the main topics covered?",
+            "suggested_question": "What are the main topics?",
             "total_pages": total_pages,
             "total_chunks": len(docs)
         }
  
  
 # ───────────────────────────────────────────────
-# TIER 1 — VOICE TRANSCRIPTION
+# VOICE TRANSCRIPTION
 # ───────────────────────────────────────────────
 def transcribe_audio(audio_bytes):
     import openai
     import tempfile
- 
     client = openai.OpenAI(api_key=api_key)
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
         tmp.write(audio_bytes)
         tmp_path = tmp.name
- 
     try:
         with open(tmp_path, "rb") as audio_file:
             transcript = client.audio.transcriptions.create(
-                model="whisper-1",
-                file=audio_file,
-                language="en"
+                model="whisper-1", file=audio_file, language="en"
             )
         return transcript.text
     except Exception as e:
@@ -412,62 +524,24 @@ def transcribe_audio(audio_bytes):
  
  
 # ───────────────────────────────────────────────
-# TIER 2 — ADAPTIVE MCQ GENERATION ← NEW
-# Generates questions based on difficulty level
-# Easy: simple recall, hints in options
-# Medium: application-level questions
-# Hard: analysis, tricky distractors
+# ADAPTIVE MCQ GENERATION
 # ───────────────────────────────────────────────
 def generate_adaptive_mcqs(docs, num_questions=5, difficulty="Medium"):
     context = "\n\n".join([d.page_content for d in docs])
  
     difficulty_instructions = {
-        "Easy": """
-- Ask simple recall and definition questions
-- Use clear, straightforward language
-- Make wrong options obviously different from correct answer
-- Focus on basic concepts and definitions
-- Add a small hint in the question itself""",
- 
-        "Medium": """
-- Ask application and understanding questions
-- Require students to apply concepts, not just recall
-- Make distractors plausible but clearly wrong on closer inspection
-- Mix conceptual and applied questions
-- Test relationships between concepts""",
- 
-        "Hard": """
-- Ask analysis, evaluation and synthesis questions
-- Create tricky distractors that are partially correct
-- Include edge cases and exceptions
-- Require deep understanding and critical thinking
-- Test ability to distinguish between similar concepts
-- Use scenario-based questions"""
+        "Easy":   "Ask simple recall questions. Clear language. Obvious distractors. Add a small hint.",
+        "Medium": "Ask application questions. Plausible distractors. Test concept relationships.",
+        "Hard":   "Ask analysis questions. Tricky distractors. Edge cases. Scenario-based."
     }
  
-    instruction = difficulty_instructions.get(difficulty, difficulty_instructions["Medium"])
- 
     prompt = f"""You are an expert exam creator making a {difficulty.upper()} difficulty quiz.
+Guidelines: {difficulty_instructions.get(difficulty, difficulty_instructions["Medium"])}
  
-Difficulty guidelines for {difficulty}:
-{instruction}
+Generate {num_questions} MCQs. Return ONLY a valid JSON array:
+[{{"question":"...","options":{{"A":"...","B":"...","C":"...","D":"..."}},"answer":"A","explanation":"...","difficulty":"{difficulty}","hint":"hint for Easy only else empty"}}]
  
-Generate {num_questions} MCQs from the context below.
-Return ONLY a valid JSON array, no extra text:
- 
-[
-  {{
-    "question": "...",
-    "options": {{"A": "...", "B": "...", "C": "...", "D": "..."}},
-    "answer": "A",
-    "explanation": "Why this answer is correct",
-    "difficulty": "{difficulty}",
-    "hint": "Small hint for the student (for Easy only, else empty string)"
-  }}
-]
- 
-Context:
-{context}"""
+Context: {context}"""
  
     response = llm.invoke(prompt)
     raw = response.content.strip()
@@ -489,48 +563,29 @@ Context:
         return []
  
  
-# Keep old function for backward compat
 def generate_mcqs(docs, num_questions=5):
     return generate_adaptive_mcqs(docs, num_questions, "Medium")
  
  
 # ───────────────────────────────────────────────
-# TIER 2 — CONCEPT MAP GENERATOR ← NEW
-# Generates topic relationships for network graph
+# CONCEPT MAP GENERATOR
 # ───────────────────────────────────────────────
 def generate_concept_map(docs):
-    """
-    Analyzes PDF and generates concept relationships.
-    Returns nodes and edges for network visualization.
-    """
     sample  = docs[:15] if len(docs) > 15 else docs
     context = "\n\n".join([d.page_content for d in sample])
  
     prompt = f"""You are an academic knowledge graph expert.
- 
-Analyze this study material and identify the key concepts and how they relate to each other.
+Analyze this material and identify key concepts and relationships.
  
 Return ONLY a valid JSON object:
-{{
-  "nodes": [
-    {{"id": "node1", "label": "Machine Learning", "category": "main"}},
-    {{"id": "node2", "label": "Supervised Learning", "category": "sub"}},
-    {{"id": "node3", "label": "Decision Trees", "category": "detail"}}
-  ],
-  "edges": [
-    {{"source": "node1", "target": "node2", "relationship": "includes"}},
-    {{"source": "node2", "target": "node3", "relationship": "uses"}}
-  ]
-}}
+{{"nodes":[{{"id":"n1","label":"Machine Learning","category":"main"}}],"edges":[{{"source":"n1","target":"n2","relationship":"includes"}}]}}
  
 Rules:
 - 8-15 nodes total
-- category must be: "main" (core topic), "sub" (subtopic), "detail" (specific concept)
-- relationship should be a short verb: "includes", "uses", "requires", "leads to", "part of", "related to"
-- Make sure every node has at least one edge
+- category: "main", "sub", or "detail"
+- relationship: short verb like "includes", "uses", "requires", "leads to"
  
-Study Material:
-{context}"""
+Study Material: {context}"""
  
     response = llm.invoke(prompt)
     raw = response.content.strip()
@@ -553,52 +608,18 @@ Study Material:
  
  
 # ───────────────────────────────────────────────
-# TIER 2 — EXAM MODE ← NEW
-# Generates full timed exam with MCQ + short answer
+# EXAM MODE
 # ───────────────────────────────────────────────
 def generate_exam(docs, num_mcq=10, num_short=3, difficulty="Medium"):
-    """
-    Generates a complete exam paper with:
-    - MCQ questions (adaptive difficulty)
-    - Short answer questions
-    Returns structured JSON exam paper
-    """
     context = "\n\n".join([d.page_content for d in docs[:15]])
  
     prompt = f"""You are an expert exam paper setter creating a {difficulty} difficulty exam.
- 
-Generate a complete exam with:
-- {num_mcq} MCQ questions
-- {num_short} short answer questions (2-5 marks each)
+Generate {num_mcq} MCQs and {num_short} short answer questions.
  
 Return ONLY a valid JSON object:
-{{
-  "exam_title": "Mock Exam: [Subject]",
-  "difficulty": "{difficulty}",
-  "total_marks": {num_mcq + (num_short * 5)},
-  "mcqs": [
-    {{
-      "id": 1,
-      "question": "...",
-      "options": {{"A": "...", "B": "...", "C": "...", "D": "..."}},
-      "answer": "A",
-      "marks": 1,
-      "explanation": "..."
-    }}
-  ],
-  "short_answers": [
-    {{
-      "id": 1,
-      "question": "Explain ... in detail",
-      "marks": 5,
-      "key_points": ["Point 1", "Point 2", "Point 3"],
-      "model_answer": "Brief model answer here"
-    }}
-  ]
-}}
+{{"exam_title":"Mock Exam: [Subject]","difficulty":"{difficulty}","total_marks":{num_mcq + (num_short * 5)},"mcqs":[{{"id":1,"question":"...","options":{{"A":"...","B":"...","C":"...","D":"..."}},"answer":"A","marks":1,"explanation":"..."}}],"short_answers":[{{"id":1,"question":"Explain...","marks":5,"key_points":["P1","P2","P3"],"model_answer":"Brief answer"}}]}}
  
-Context:
-{context}"""
+Context: {context}"""
  
     response = llm.invoke(prompt)
     raw = response.content.strip()
@@ -627,34 +648,16 @@ def generate_study_plan(docs, num_days=7, weak_topics=None):
     sample  = docs[:15] if len(docs) > 15 else docs
     context = "\n\n".join([d.page_content for d in sample])
  
-    weak_topics_str = ""
+    weak_str = ""
     if weak_topics:
-        top_weak = sorted(weak_topics.items(), key=lambda x: x[1], reverse=True)[:3]
-        weak_list = [t[0] for t in top_weak]
-        weak_topics_str = f"\nIMPORTANT: Prioritize these weak topics: {weak_list}\n"
+        top = sorted(weak_topics.items(), key=lambda x: x[1], reverse=True)[:3]
+        weak_str = f"\nPrioritize weak topics: {[t[0] for t in top]}\n"
  
-    prompt = f"""You are an expert academic planner creating a personalized {num_days}-day study plan.
-{weak_topics_str}
- 
+    prompt = f"""Create a personalized {num_days}-day study plan.{weak_str}
 Return ONLY a valid JSON object:
-{{
-  "plan_title": "{num_days}-Day Study Plan: [Subject]",
-  "total_days": {num_days},
-  "days": [
-    {{
-      "day": 1,
-      "title": "Day title",
-      "topics": ["Topic 1", "Topic 2"],
-      "study_focus": "One sentence focus",
-      "suggested_questions": ["Q1?", "Q2?", "Q3?"],
-      "difficulty": "Easy",
-      "estimated_hours": 2
-    }}
-  ]
-}}
+{{"plan_title":"{num_days}-Day Study Plan: [Subject]","total_days":{num_days},"days":[{{"day":1,"title":"...","topics":["T1","T2"],"study_focus":"One sentence","suggested_questions":["Q1?","Q2?","Q3?"],"difficulty":"Easy","estimated_hours":2}}]}}
  
-Study Material:
-{context}"""
+Study Material: {context}"""
  
     response = llm.invoke(prompt)
     raw = response.content.strip()
