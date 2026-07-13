@@ -1,238 +1,233 @@
-# 🎓 PrepAI – AI-Powered Adaptive Study Assistant
+🎓 PrepAI — AI-Powered Adaptive Study Assistant
 
-<div align="center">
 
-![Python](https://img.shields.io/badge/Python-3.10+-blue)
-![Streamlit](https://img.shields.io/badge/Streamlit-App-red)
-![OpenAI](https://img.shields.io/badge/OpenAI-GPT--4o--mini-green)
-![RAG](https://img.shields.io/badge/RAG-Retrieval%20Augmented%20Generation-purple)
-![Status](https://img.shields.io/badge/Status-Active-success)
+Turn any PDF into a complete intelligent learning system with RAG, hybrid search, adaptive quizzes, concept maps, timed exams, and persistent user memory.
 
-An intelligent study assistant that allows students to upload PDFs and learn smarter using AI-powered question answering, test generation, personalized study plans, and learning analytics.
 
-</div>
 
----
+Show Image
+Show Image
+Show Image
+Show Image
+Show Image
 
-# 📚 Overview
 
-PrepAI is an AI-powered adaptive learning platform built using **Retrieval-Augmented Generation (RAG)** and **Large Language Models (LLMs)**.
+🚀 Live Demo
 
-Students can upload their study materials and instantly:
+Try PrepAI Live →
 
-✅ Ask questions from their notes
 
-✅ Generate quizzes and tests
+📌 What Problem Does It Solve?
 
-✅ Create personalized study plans
+Students have PDFs, notes, and textbooks but no intelligent way to study from them. PrepAI transforms any PDF into a complete adaptive learning platform — it answers questions, generates quizzes, builds personalized study plans, creates flashcards, and tracks your learning progress across sessions.
 
-✅ Track weak topics and learning progress
 
-The goal of PrepAI is to make learning **personalized, interactive, and efficient**.
+✨ Features
 
----
+💬 Study Chat
 
-# ✨ Features
 
-## 💬 Study Chat
-- Ask questions directly from uploaded PDFs.
-- Get structured answers.
-- Supports short and long-form responses.
+Ask questions from your uploaded PDF(s) and get structured 2 Mark / 5 Mark / 10 Mark answers
+Hybrid retrieval combining BM25 keyword search + FAISS semantic search using Reciprocal Rank Fusion
+Every answer evaluated on 3 quality metrics: Faithfulness, Answer Relevancy, Context Precision
+Conversation memory — system remembers previous questions in the session
+Voice input via OpenAI Whisper — speak your question instead of typing
+Source attribution showing exactly which PDF and which page the answer came from
 
-## 📝 Test Mode
-- Generate MCQs automatically.
-- Instant scoring and explanations.
-- Helps with exam preparation.
 
-## 📅 Study Plan
-- Generates day-by-day study schedules.
-- Personalized according to uploaded material.
+🧪 Test Mode (Adaptive Quiz)
 
-## 📊 Analytics
-- Track weak topics.
-- Monitor progress and quiz performance.
-- Identify areas that need improvement.
 
-## 🔍 Hybrid Search
-- Semantic search using vector embeddings.
-- Context-aware retrieval.
-- Accurate responses from study material.
+MCQs generated as structured JSON — no fragile string parsing
+Adaptive difficulty — system automatically adjusts to Easy/Medium/Hard based on your past quiz scores
+Hints shown on Easy questions, tricky distractors on Hard questions
+Full answer review with explanations after submission
 
----
 
-# 🏗️ System Architecture
+📅 Study Plan
 
-```text
-User Uploads PDF
-        ↓
-PDF Processing
-        ↓
-Chunking & Embeddings
-        ↓
-Vector Database
-        ↓
-RAG Pipeline
-        ↓
-GPT-4o-mini
-        ↓
-Answer Generation
-```
 
----
+AI analyzes your PDF and distributes topics across N days intelligently
+Weak topic prioritization — topics you struggle with get scheduled first
+Day cards with topics, focus statement, suggested questions, difficulty, estimated hours
+Mark days complete with persistent progress bar (saved to database)
 
-# 🛠️ Tech Stack
 
-| Technology | Purpose |
-|------------|----------|
-| Python | Backend |
-| Streamlit | Web Application |
-| OpenAI GPT-4o-mini | LLM |
-| RAG Pipeline | Context Retrieval |
-| Vector Database | Semantic Search |
-| PyPDF | PDF Processing |
-| GitHub | Version Control |
+📈 Analytics Dashboard
 
----
 
-# 📂 Project Structure
+Weak topic bar chart with severity levels (red/yellow/navy)
+Quiz score history line chart with adaptive difficulty color coding
+Recent questions log with confidence scores
+Day streak tracking — study consecutive days to build streaks
+Export full session report as downloadable file
 
-```bash
+
+🃏 Flashcards
+
+
+Auto-generated after every question using spaced repetition principles
+Front (concept) + Back (explanation) + Topic tag
+Got It / Review Again tracking
+Cards needing review surfaced at bottom for re-study
+
+
+🗺️ Concept Map
+
+
+Visual network graph showing how topics in your PDF connect
+Nodes color-coded: Navy = Core Topic, Gold = Subtopic, Grey = Detail
+Relationship labels: includes, requires, leads to, part of
+Works across multiple PDFs simultaneously
+
+
+📝 Exam Mode
+
+
+Full timed mock exam — choose MCQ count, short answer count, time limit, difficulty
+Countdown timer turns red under 2 minutes — auto-submits when time runs out
+Section A: MCQs with adaptive difficulty
+Section B: Short answer questions with model answers and key points
+Complete results with grade (Distinction / Pass / Fail)
+
+
+📚 Multi-PDF Support
+
+
+Upload up to 5 PDFs simultaneously
+Cross-document retrieval — questions search across ALL PDFs at once
+Per-PDF Document Intelligence — summary, topics, difficulty, study time
+Source attribution shows exactly which PDF and pages contributed to each answer
+Remove individual PDFs without losing others
+
+
+🔐 Authentication + Persistent Memory
+
+
+Login / Register with bcrypt password hashing
+SQLite database — all data persists across sessions and logouts
+Level 1: Session persistence (survives page refresh)
+Level 2: User profiles with full history
+Level 3: Adaptive behavior based on historical performance
+
+
+
+🏗️ Architecture
+
+PDF Upload(s)
+      ↓
+Text Extraction (PyPDFLoader)
+      ↓
+Chunking (RecursiveCharacterTextSplitter)
+      ↓
+┌─────────────────────────────┐
+│  FAISS (Semantic Search)    │
+│  BM25  (Keyword Search)     │
+└──────────┬──────────────────┘
+           ↓
+  Reciprocal Rank Fusion (RRF)
+           ↓
+  GPT-4o-mini (Answer Generation)
+           ↓
+  RAGAS / Local Evaluation
+           ↓
+  Response + Metrics + Memory
+
+
+🛠️ Tech Stack
+
+TechnologyPurposePython 3.11Core languageStreamlitWeb UI frameworkLangChainRAG pipeline orchestrationOpenAI GPT-4o-miniAnswer generation, quiz/plan/exam creation, topic detectionOpenAI WhisperVoice input transcriptionOpenAI EmbeddingsText → vector conversionFAISSVector database for semantic searchBM25 (rank-bm25)Keyword search indexReciprocal Rank FusionHybrid retrieval result mergingRAGASProduction-grade RAG evaluationSQLitePersistent user data storagebcryptPassword hashingPlotlyInteractive analytics charts + concept mappython-dotenvSecure API key management
+
+
+📁 Project Structure
+
 prepai/
-│
-├── app.py
-├── rag_pipeline.py
-├── requirements.txt
-├── temp.pdf
-└── README.md
-```
+├── app.py              # Main Streamlit application (7 modes)
+├── rag_pipeline.py     # RAG engine, hybrid search, all AI functions
+├── auth.py             # Login, register, password hashing
+├── database.py         # SQLite setup, all read/write functions
+├── requirements.txt    # Python dependencies
+└── .env                # API keys (not committed)
 
----
 
-# 🚀 Installation
+⚙️ Setup & Installation
 
-### Clone Repository
+1. Clone the repository
 
-```bash
-git clone https://github.com/Rihan077/prepai.git
+bashgit clone https://github.com/Rihan077/prepai.git
 cd prepai
-```
 
-### Install Requirements
+2. Create virtual environment
 
-```bash
-pip install -r requirements.txt
-```
+bashpython -m venv venv
+# Windows
+.\venv\Scripts\Activate.ps1
+# Mac/Linux
+source venv/bin/activate
 
-### Add Environment Variables
+3. Install dependencies
 
-Create a `.env` file:
+bashpip install -r requirements.txt
 
-```env
-OPENAI_API_KEY=your_api_key_here
-```
+4. Set up environment variables
 
-### Run Application
+Create a .env file in the root directory:
 
-```bash
-streamlit run app.py
-```
+OPENAI_API_KEY=your-openai-api-key-here
 
----
+5. Run the app
 
-# 🌐 Live Demo
+bashstreamlit run app.py
 
-Coming Soon...
 
----
+🧠 Key Technical Concepts
 
-# 📸 Application Preview
+Hybrid Search (BM25 + FAISS + RRF)
 
-- Upload PDFs
-- Ask questions
-- Generate tests
-- Create study plans
-- Analyze weak topics
+Most RAG projects use only semantic search. PrepAI combines keyword search (BM25 — same algorithm as Elasticsearch) and semantic search (FAISS) using Reciprocal Rank Fusion. Formula: score(doc) = Σ 1/(k + rank) where k=60 is the standard constant from the original RRF research paper.
 
----
+RAGAS Evaluation Pipeline
 
-# 🎯 Future Roadmap
+Every answer is automatically scored on three industry-standard metrics:
 
-- User Authentication
-- Multi-document Support
-- Voice Assistant
-- AI Tutor Mode
-- Flashcard Generation
-- Leaderboards
-- Mobile Application
-- Multi-language Support
-- Cloud Deployment
-- AI Agents Integration
 
----
+Faithfulness — is the answer grounded in the source document?
+Answer Relevancy — does it actually answer what was asked?
+Context Precision — did retrieval fetch the right chunks?
 
-# 💡 Use Cases
 
-- College Students
-- Competitive Exam Preparation
-- Self-Learning
-- Online Courses
-- Teachers and Educators
-- Corporate Training
+Adaptive Difficulty Engine
 
----
+Quiz difficulty adjusts based on performance history stored in SQLite. Average score < 50% on a topic → Easy questions with hints. Average score > 80% → Hard questions with tricky distractors. This is how real EdTech platforms like Duolingo work.
 
-# 🔒 Security
+Multi-PDF Cross-Document Retrieval
 
-- API keys stored securely using environment variables.
-- No permanent storage of uploaded documents.
-- User data privacy focused.
+Each PDF gets its own FAISS + BM25 index. On query, all indexes are searched in parallel. Results are merged using RRF across all sources. Each retrieved chunk is tagged with its source PDF and page number, enabling precise attribution.
 
----
 
-# 📈 Future Vision
+🎯 Interview One-Liner
 
-PrepAI aims to become a complete AI learning ecosystem that combines:
 
-- Personalized Learning
-- Intelligent Tutoring
-- Adaptive Assessments
-- Learning Analytics
-- AI Agents for Education
+"I built PrepAI — an adaptive learning platform with hybrid BM25+FAISS retrieval, RAGAS evaluation, adaptive quiz difficulty, multi-PDF cross-document search, voice input, concept maps, timed exams, and persistent user memory using SQLite — deployed on Streamlit Cloud."
 
----
 
-# 👨‍💻 Developer
 
-**Rihan Bagwan**
 
-B.Tech Computer Science Engineering  
-AI & Data Science Enthusiast  
-Building AI-powered educational products and intelligent systems.
+📊 What Makes This Different
 
-GitHub: https://github.com/Rihan077
+FeatureMost Student RAG ProjectsPrepAISearchSemantic onlyHybrid BM25 + FAISS + RRFEvaluationNoneRAGAS (Faithfulness, Relevancy, Precision)QuizBasic MCQAdaptive difficulty based on historyMemorySession onlyPersistent SQLite across sessionsMulti-documentSingle PDFUp to 5 PDFs simultaneouslyVoiceNoneOpenAI Whisper integrationConcept MapNonePlotly network graphExamNoneTimed with auto-submit + model answersAuthNoneLogin + bcrypt password hashing
 
----
 
-# ⭐ Support
+👤 Author
 
-If you like this project:
+Rihan Bagwan
+B.Tech CSE (AI & Data Science) — Sanjay Ghodawat University
+IIT Roorkee IntelliPath AI & DS Programme
 
-⭐ Star the repository  
-🍴 Fork the project  
-📢 Share it with others
+Show Image
+Show Image
 
----
 
-# 📄 License
+📄 License
 
-This project is licensed under the MIT License.
-
----
-
-<div align="center">
-
-### 🚀 Learn Smarter with PrepAI
-
-AI-powered adaptive learning for every student.
-
-</div>
+MIT License — feel free to use, modify and distribute.
